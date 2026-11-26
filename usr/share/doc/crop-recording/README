@@ -5,7 +5,6 @@ The installer starts it for users already logged in to X11, and the desktop
 starts it at future logins.
 
 When upgrading from the old croprec package, the new package replaces it.
-Crop Recording reads the previous shortcut setting until you save a new one.
 
 1. Press Ctrl+R to open the area picker and its on-screen instructions.
 2. Drag to select the area to record. Press Esc to cancel.
@@ -13,16 +12,10 @@ Crop Recording reads the previous shortcut setting until you save a new one.
    the elapsed time. Leave enough space outside the selection for the timer.
 4. Press Ctrl+Enter again to stop. In the dialog, choose Save to Folder or Copy Video.
 
-Use crop-recording --menu to change or reset the key that opens the picker. The
-service applies saved settings when idle. Ctrl+Enter always starts and stops
-recording. The shortcut settings are saved in $XDG_CONFIG_HOME/crop-recording/hotkey
-(usually ~/.config/crop-recording/hotkey).
-
 To run from source without installing Crop Recording, launch it in an X11 session
 with the dependencies in DEBIAN/control available:
 
   /usr/bin/python3 usr/bin/crop-recording
-  /usr/bin/python3 usr/bin/crop-recording --menu
   /usr/bin/python3 usr/bin/crop-recording --region 120,80,640,481
 
 The --region option preselects an area when the picker opens. Ctrl+C exits

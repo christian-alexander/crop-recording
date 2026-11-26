@@ -14,10 +14,6 @@ import tempfile
 import time
 
 
-DEFAULT_HOTKEY = "Ctrl+R"
-MODIFIERS = ("ctrl", "alt", "shift", "super")
-
-
 def say(message):
     print(message, file=sys.stderr, flush=True)
 
@@ -28,78 +24,16 @@ def region_arg(value):
     return tuple(map(int, value.split(",")))
 
 
-def shortcut_parts(shortcut):
-    *prefix, key = shortcut.split("+")
-    names = [item.lower() for item in prefix]
-    if not names or len(set(names)) != len(names) or set(names) - set(MODIFIERS):
-        raise ValueError(f"Invalid shortcut: {shortcut}. Use Ctrl, Alt, Shift, or Super.")
-    return names, key
-
-
-def shortcut_config_path():
-    config_home = Path(os.environ.get("XDG_CONFIG_HOME", ""))
-    if not config_home.is_absolute():
-        config_home = Path.home() / ".config"
-    return config_home / "crop-recording" / "hotkey"
-
-
-def load_shortcut(path):
-    previous_path = path.parent.parent / "croprec" / path.name
-    for candidate in (path, previous_path):
-        try:
-            return candidate.read_text(encoding="utf-8").strip() or DEFAULT_HOTKEY
-        except FileNotFoundError:
-            continue
-    return DEFAULT_HOTKEY
-
-
-def shortcut_menu(path):
-    say(f"Open picker shortcut: {load_shortcut(path)}")
-    say("Start and stop recording: Ctrl+Enter")
-    say("1. Change the picker shortcut\n2. Reset to Ctrl+R\n0. Exit")
-    while True:
-        try:
-            choice = input("Choose [0–2]: ").strip()
-            if choice == "0":
-                return
-            if choice == "2":
-                shortcut = DEFAULT_HOTKEY
-                break
-            if choice != "1":
-                say("Choose 0, 1, or 2.")
-                continue
-            value = input("New shortcut (example: Ctrl+Shift+F9): ").strip()
-            names, key = shortcut_parts(value)
-            if not re.fullmatch(r"[A-Za-z0-9]|[Ff](?:[1-9]|1[0-2])", key):
-                raise ValueError("Use a letter, number, or F1–F12 after the modifier.")
-            shortcut = "+".join([name.capitalize() for name in names] + [key.upper()])
-            break
-        except ValueError as exc:
-            say(str(exc))
-        except (EOFError, KeyboardInterrupt):
-            say("\nSettings canceled.")
-            return
-
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temp = tempfile.NamedTemporaryFile(dir=path.parent, mode="w", encoding="utf-8", delete=False)
-    temp_path = Path(temp.name)
-    try:
-        with temp:
-            temp.write(shortcut + "\n")
-        temp_path.replace(path)
-    finally:
-        temp_path.unlink(missing_ok=True)
-    say(f"Shortcut saved: {shortcut}")
-
-
 class Shortcuts:
     def __init__(self, connection, root):
         from Xlib import X, XK
 
         self.connection = connection
         self.root = root
-        self.modifiers = {"ctrl": X.ControlMask, "alt": X.Mod1Mask,
-                          "shift": X.ShiftMask, "super": X.Mod4Mask}
+        r_key = self.keycode("r")
+        if not r_key:
+            raise ValueError("Could not find the R key in the X11 keyboard map.")
+        self.picker_key = r_key, X.ControlMask
         lock_codes = {connection.keysym_to_keycode(XK.string_to_keysym(name))
                       for name in ("Num_Lock", "Scroll_Lock")}
         ignored = {X.LockMask}
@@ -117,18 +51,6 @@ class Shortcuts:
         from Xlib import XK
 
         return self.connection.keysym_to_keycode(XK.string_to_keysym(name))
-
-    def activation(self, shortcut):
-        names, key = shortcut_parts(shortcut)
-        if not re.fullmatch(r"[A-Za-z0-9]|[Ff](?:[1-9]|1[0-2])", key):
-            raise ValueError("Use a letter, number, or F1–F12 in the picker shortcut.")
-        code = self.keycode(key.lower() if len(key) == 1 else key.upper())
-        if not code:
-            raise ValueError(f"Unknown key: {key}. Use a letter, number, or F1–F12.")
-        binding = code, sum(self.modifiers[name] for name in names)
-        if binding in self.enter:
-            raise ValueError("Ctrl+Enter is reserved for starting and stopping recordings.")
-        return binding
 
     def grab(self, binding, name):
         from Xlib import X, error
@@ -224,41 +146,8 @@ class CropRecording:
         self.picker = self.overlay = self.recording = None
         self.clipboard = FileClipboard()
         self.result = None
-        self.activation = None
-        self.config = shortcut_config_path()
-        self.config_value = None
-        self.reload_hotkey()
-        if self.activation is None:
-            self.set_hotkey(DEFAULT_HOTKEY)
-
-    def set_hotkey(self, name):
-        binding = self.shortcuts.activation(name)
-        if binding != self.activation:
-            self.shortcuts.grab(binding, name)
-            if self.activation is not None:
-                self.shortcuts.ungrab(self.activation)
-            self.activation = binding
-            say(f"Crop Recording is ready. Press {name} to open the area picker.")
-
-    def reload_hotkey(self):
-        if self.picker or self.recording:
-            return True
-        try:
-            value = load_shortcut(self.config)
-        except (OSError, ValueError) as exc:
-            if self.config_value != str(exc):
-                self.config_value = str(exc)
-                say(f"Could not read shortcut settings: {exc}")
-            return True
-        if value != self.config_value:
-            self.config_value = value
-            try:
-                self.set_hotkey(value)
-            except ValueError as exc:
-                say(str(exc))
-                if self.activation is not None or value != DEFAULT_HOTKEY:
-                    notify("Crop Recording shortcut unavailable", str(exc))
-        return True
+        self.shortcuts.grab(self.shortcuts.picker_key, "Ctrl+R")
+        say("Crop Recording is ready. Press Ctrl+R to open the area picker.")
 
     def open_picker(self):
         from overlay import Picker
@@ -348,10 +237,10 @@ class CropRecording:
             if event.type != X.KeyPress or event.detail in self.held_keys:
                 continue
             key = event.detail, event.state & self.shortcuts.mask
-            if key != self.activation and key not in self.active_keys:
+            if key != self.shortcuts.picker_key and key not in self.active_keys:
                 continue
             self.held_keys.add(event.detail)
-            if key == self.activation and not (self.picker or self.recording or self.result):
+            if key == self.shortcuts.picker_key and not (self.picker or self.recording or self.result):
                 self.open_picker()
             elif self.picker and key == self.shortcuts.escape:
                 self.close_session()
@@ -399,7 +288,6 @@ def run(region):
         GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, signal.SIGINT, quit_requested)
         GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, signal.SIGTERM, quit_requested)
         GLib.timeout_add(30, daemon.tick)
-        GLib.timeout_add_seconds(1, daemon.reload_hotkey)
         try:
             loop.run()
         finally:
@@ -411,14 +299,10 @@ def run(region):
 def main():
     os.environ["LANGUAGE"] = "en"
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--menu", action="store_true", help="open the shortcut settings menu")
     parser.add_argument("--region", type=region_arg, metavar="X,Y,LEBAR,TINGGI",
                         help="preselect an area by coordinates, or drag to select without this option")
     args = parser.parse_args()
     try:
-        if args.menu:
-            shortcut_menu(shortcut_config_path())
-            return 0
         run(args.region)
     except (ValueError, OSError, ImportError, argparse.ArgumentTypeError) as exc:
         say(f"crop-recording: {exc}")
