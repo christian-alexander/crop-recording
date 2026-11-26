@@ -39,10 +39,10 @@ class Shortcuts:
         self.mask = 0xff & ~sum(ignored)
         self.extras = {sum(subset) for size in range(len(ignored) + 1)
                        for subset in combinations(ignored, size)}
-        self.enter = {(self.keycode(name), X.ControlMask) for name in ("Return", "KP_Enter")}
-        self.enter = {key for key in self.enter if key[0]}
-        if not self.enter:
-            raise ValueError("Could not find an Enter key in the X11 keyboard map.")
+        a_key = self.keycode("a")
+        if not a_key:
+            raise ValueError("Could not find the A key in the X11 keyboard map.")
+        self.recording_key = a_key, X.ControlMask | X.Mod1Mask
         self.escape = self.keycode("Escape"), 0
 
     def keycode(self, name):
@@ -144,9 +144,8 @@ class CropRecording:
         self.picker = self.overlay = self.recording = None
         self.clipboard = FileClipboard()
         self.result = None
-        for binding in self.shortcuts.enter:
-            self.shortcuts.grab(binding, "Ctrl+Enter")
-        say("Crop Recording is ready. Press Ctrl+Enter to open the area picker.")
+        self.shortcuts.grab(self.shortcuts.recording_key, "Ctrl+Alt+A")
+        say("Crop Recording is ready. Press Ctrl+Alt+A to open the area picker.")
 
     def open_picker(self):
         from overlay import Picker
@@ -233,7 +232,7 @@ class CropRecording:
             if event.type != X.KeyPress or event.detail in self.held_keys:
                 continue
             key = event.detail, event.state & self.shortcuts.mask
-            if key in self.shortcuts.enter:
+            if key == self.shortcuts.recording_key:
                 if self.recording:
                     self.close_session(timestamp=event.time)
                 elif self.picker:

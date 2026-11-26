@@ -129,13 +129,13 @@ class Picker(Overlay):
 
         if self.ready:
             heading = f"Area {self.region[2]} × {self.region[3]} pixels"
-            detail = "Ctrl+Enter to start   ·   Drag to adjust   ·   Esc to cancel"
+            detail = "Ctrl+Alt+A to start   ·   Drag to adjust   ·   Esc to cancel"
         elif self.region and self.anchor is None and min(self.region[2:]) >= 2:
             heading = "Leave room for the timer"
             detail = "Select a smaller area to keep the timer visible."
         else:
             heading = "Select a recording area"
-            detail = "Drag to select   ·   Ctrl+Enter to start   ·   Esc to cancel"
+            detail = "Drag to select   ·   Ctrl+Alt+A to start   ·   Esc to cancel"
         monitor = self.monitor
         panel_width = min(472, monitor.width)
         px = monitor.x + (monitor.width - panel_width) // 2

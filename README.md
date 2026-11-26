@@ -11,16 +11,16 @@ Crop Recording was tested on Ubuntu 24.04 LTS. It requires Python 3.10 or newer 
 Open a terminal in the directory containing the `.deb` and run:
 
 ```bash
-sudo apt install ./crop-recording_1.2.5_all.deb
+sudo apt install ./crop-recording_1.2.6_all.deb
 ```
 
 The installed service starts automatically when you log in to an X11 desktop.
 
 ## Record
 
-1. Press **Ctrl+Enter** to open the area picker.
+1. Press **Ctrl+Alt+A** to open the area picker.
 2. Drag to select the area. Press **Esc** to cancel.
-3. Press **Ctrl+Enter** to start recording. Press **Ctrl+Enter** again to stop.
+3. Press **Ctrl+Alt+A** to start recording. Press **Ctrl+Alt+A** again to stop.
 4. Select **Save to Folder** to choose a location, or **Copy Video** to paste the MP4 into an app that accepts file attachments.
 
 To check whether the service is running, use `systemctl --user status crop-recording.service`.

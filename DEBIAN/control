@@ -1,5 +1,5 @@
 Package: crop-recording
-Version: 1.2.5
+Version: 1.2.6
 Architecture: all
 Section: video
 Priority: optional
@@ -8,6 +8,6 @@ Depends: python3 (>= 3.10), python3-xlib, python3-gi, python3-gi-cairo, gir1.2-g
 Conflicts: croprec
 Replaces: croprec
 Description: Record a selected region of an X11 desktop
- Use Ctrl+Enter to open the area picker, start recording, and stop recording.
+ Use Ctrl+Alt+A to open the area picker, start recording, and stop recording.
  Crop Recording shows elapsed time outside the selected area and offers to
  save the lossless RGB H.264 MP4 or copy it for pasting as a file.
