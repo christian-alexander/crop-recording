@@ -6,7 +6,7 @@ starts it at future logins.
 
 When upgrading from the old croprec package, the new package replaces it.
 
-1. Press Ctrl+R to open the area picker and its on-screen instructions.
+1. Press Ctrl+Enter to open the area picker and its on-screen instructions.
 2. Drag to select the area to record. Press Esc to cancel.
 3. Press Ctrl+Enter to record. The rest of the screen is dimmed and shows
    the elapsed time. Leave enough space outside the selection for the timer.

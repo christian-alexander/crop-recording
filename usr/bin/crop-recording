@@ -30,10 +30,6 @@ class Shortcuts:
 
         self.connection = connection
         self.root = root
-        r_key = self.keycode("r")
-        if not r_key:
-            raise ValueError("Could not find the R key in the X11 keyboard map.")
-        self.picker_key = r_key, X.ControlMask
         lock_codes = {connection.keysym_to_keycode(XK.string_to_keysym(name))
                       for name in ("Num_Lock", "Scroll_Lock")}
         ignored = {X.LockMask}
@@ -45,6 +41,8 @@ class Shortcuts:
                        for subset in combinations(ignored, size)}
         self.enter = {(self.keycode(name), X.ControlMask) for name in ("Return", "KP_Enter")}
         self.enter = {key for key in self.enter if key[0]}
+        if not self.enter:
+            raise ValueError("Could not find an Enter key in the X11 keyboard map.")
         self.escape = self.keycode("Escape"), 0
 
     def keycode(self, name):
@@ -141,28 +139,34 @@ class CropRecording:
         self.region = region
         self.root = connection.screen().root
         self.shortcuts = Shortcuts(connection, self.root)
-        self.active_keys = set()
+        self.escape_grabbed = False
         self.held_keys = set()
         self.picker = self.overlay = self.recording = None
         self.clipboard = FileClipboard()
         self.result = None
-        self.shortcuts.grab(self.shortcuts.picker_key, "Ctrl+R")
-        say("Crop Recording is ready. Press Ctrl+R to open the area picker.")
+        for binding in self.shortcuts.enter:
+            self.shortcuts.grab(binding, "Ctrl+Enter")
+        say("Crop Recording is ready. Press Ctrl+Enter to open the area picker.")
 
     def open_picker(self):
         from overlay import Picker
 
         try:
-            for binding, name in [(key, "Ctrl+Enter") for key in self.shortcuts.enter] + [
-                (self.shortcuts.escape, "Esc")
-            ]:
-                self.shortcuts.grab(binding, name)
-                self.active_keys.add(binding)
+            self.shortcuts.grab(self.shortcuts.escape, "Esc")
+            self.escape_grabbed = True
             size = self.root.get_geometry()
             self.picker = Picker(size.width, size.height, self.region)
         except (OSError, RuntimeError, ValueError) as exc:
             self.close_session()
             self.report_error(exc)
+
+    def close_picker(self):
+        if self.picker:
+            self.picker.close()
+            self.picker = None
+        if self.escape_grabbed:
+            self.shortcuts.ungrab(self.shortcuts.escape)
+            self.escape_grabbed = False
 
     def start_recording(self):
         from overlay import RecordingOverlay
@@ -170,10 +174,7 @@ class CropRecording:
         picker = self.picker
         region = picker.region
         width, height = picker.width, picker.height
-        picker.close()
-        self.picker = None
-        self.shortcuts.ungrab(self.shortcuts.escape)
-        self.active_keys.discard(self.shortcuts.escape)
+        self.close_picker()
         try:
             self.overlay = RecordingOverlay(width, height, region)
             self.recording = Recording(self.display_name, region)
@@ -195,12 +196,7 @@ class CropRecording:
             if self.overlay:
                 self.overlay.close()
                 self.overlay = None
-            if self.picker:
-                self.picker.close()
-                self.picker = None
-            for binding in self.active_keys:
-                self.shortcuts.ungrab(binding)
-            self.active_keys.clear()
+            self.close_picker()
         if path and show_result:
             from delivery import RecordingDialog
 
@@ -237,18 +233,19 @@ class CropRecording:
             if event.type != X.KeyPress or event.detail in self.held_keys:
                 continue
             key = event.detail, event.state & self.shortcuts.mask
-            if key != self.shortcuts.picker_key and key not in self.active_keys:
-                continue
-            self.held_keys.add(event.detail)
-            if key == self.shortcuts.picker_key and not (self.picker or self.recording or self.result):
-                self.open_picker()
-            elif self.picker and key == self.shortcuts.escape:
-                self.close_session()
-            elif key in self.shortcuts.enter:
+            if key in self.shortcuts.enter:
                 if self.recording:
                     self.close_session(timestamp=event.time)
-                elif self.picker and self.picker.ready:
-                    self.start_recording()
+                elif self.picker:
+                    if self.picker.ready:
+                        self.start_recording()
+                elif not self.result:
+                    self.open_picker()
+            elif self.picker and key == self.shortcuts.escape:
+                self.close_session()
+            else:
+                continue
+            self.held_keys.add(event.detail)
         if self.held_keys:
             keys = self.connection.query_keymap()
             self.held_keys = {code for code in self.held_keys
