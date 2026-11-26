@@ -1,0 +1,43 @@
+Crop Recording | Ubuntu X11 (Ubuntu on Xorg)
+
+After installation, Crop Recording runs as a service in your X11 desktop session.
+The installer starts it for users already logged in to X11, and the desktop
+starts it at future logins.
+
+When upgrading from the old croprec package, the new package replaces it.
+Crop Recording reads the previous shortcut setting until you save a new one.
+
+1. Press Ctrl+R to open the area picker and its on-screen instructions.
+2. Drag to select the area to record. Press Esc to cancel.
+3. Press Ctrl+Enter to record. The rest of the screen is dimmed and shows
+   the elapsed time. Leave enough space outside the selection for the timer.
+4. Press Ctrl+Enter again to stop. In the dialog, choose Save to Folder or Copy Video.
+
+Use crop-recording --menu to change or reset the key that opens the picker. The
+service applies saved settings when idle. Ctrl+Enter always starts and stops
+recording. The shortcut settings are saved in $XDG_CONFIG_HOME/crop-recording/hotkey
+(usually ~/.config/crop-recording/hotkey).
+
+To run from source without installing Crop Recording, launch it in an X11 session
+with the dependencies in DEBIAN/control available:
+
+  /usr/bin/python3 usr/bin/crop-recording
+  /usr/bin/python3 usr/bin/crop-recording --menu
+  /usr/bin/python3 usr/bin/crop-recording --region 120,80,640,481
+
+The --region option preselects an area when the picker opens. Ctrl+C exits
+the foreground process. For the installed service, use
+systemctl --user status crop-recording.service to check its status.
+
+Crop Recording records the chosen pixels and the cursor at 30 fps, with no audio,
+using lossless RGB H.264 in an MP4. Some players require software decoding.
+The overlay stays outside the video. On an X11 desktop without a compositor,
+the dimmed area uses a fine stipple so the desktop remains visible.
+
+Save to Folder opens the desktop file picker. Copy Video offers the MP4
+as a file attachment, with no plain-text clipboard format. Clips up to
+32 MiB are also offered as video/mp4 data. Copies are in ~/Crop Recording Clipboard
+so confined browsers can read them. Keep the source file there while the
+receiving app is using it. A website must support pasting attachments to
+accept Ctrl+V. Otherwise, select the MP4 through its upload dialog.
+The resulting path is printed to the service log or terminal.

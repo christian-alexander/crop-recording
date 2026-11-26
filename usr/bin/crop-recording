@@ -1,0 +1,430 @@
+#!/usr/bin/python3
+"""Run Crop Recording in an Ubuntu X11 desktop session."""
+import argparse
+from datetime import datetime
+from itertools import combinations
+import os
+from pathlib import Path
+import re
+import select
+import signal
+import subprocess
+import sys
+import tempfile
+import time
+
+
+DEFAULT_HOTKEY = "Ctrl+R"
+MODIFIERS = ("ctrl", "alt", "shift", "super")
+
+
+def say(message):
+    print(message, file=sys.stderr, flush=True)
+
+
+def region_arg(value):
+    if not re.fullmatch(r"[0-9]+,[0-9]+,[0-9]+,[0-9]+", value):
+        raise argparse.ArgumentTypeError("Use the format X,Y,WIDTH,HEIGHT.")
+    return tuple(map(int, value.split(",")))
+
+
+def shortcut_parts(shortcut):
+    *prefix, key = shortcut.split("+")
+    names = [item.lower() for item in prefix]
+    if not names or len(set(names)) != len(names) or set(names) - set(MODIFIERS):
+        raise ValueError(f"Invalid shortcut: {shortcut}. Use Ctrl, Alt, Shift, or Super.")
+    return names, key
+
+
+def shortcut_config_path():
+    config_home = Path(os.environ.get("XDG_CONFIG_HOME", ""))
+    if not config_home.is_absolute():
+        config_home = Path.home() / ".config"
+    return config_home / "crop-recording" / "hotkey"
+
+
+def load_shortcut(path):
+    previous_path = path.parent.parent / "croprec" / path.name
+    for candidate in (path, previous_path):
+        try:
+            return candidate.read_text(encoding="utf-8").strip() or DEFAULT_HOTKEY
+        except FileNotFoundError:
+            continue
+    return DEFAULT_HOTKEY
+
+
+def shortcut_menu(path):
+    say(f"Open picker shortcut: {load_shortcut(path)}")
+    say("Start and stop recording: Ctrl+Enter")
+    say("1. Change the picker shortcut\n2. Reset to Ctrl+R\n0. Exit")
+    while True:
+        try:
+            choice = input("Choose [0–2]: ").strip()
+            if choice == "0":
+                return
+            if choice == "2":
+                shortcut = DEFAULT_HOTKEY
+                break
+            if choice != "1":
+                say("Choose 0, 1, or 2.")
+                continue
+            value = input("New shortcut (example: Ctrl+Shift+F9): ").strip()
+            names, key = shortcut_parts(value)
+            if not re.fullmatch(r"[A-Za-z0-9]|[Ff](?:[1-9]|1[0-2])", key):
+                raise ValueError("Use a letter, number, or F1–F12 after the modifier.")
+            shortcut = "+".join([name.capitalize() for name in names] + [key.upper()])
+            break
+        except ValueError as exc:
+            say(str(exc))
+        except (EOFError, KeyboardInterrupt):
+            say("\nSettings canceled.")
+            return
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp = tempfile.NamedTemporaryFile(dir=path.parent, mode="w", encoding="utf-8", delete=False)
+    temp_path = Path(temp.name)
+    try:
+        with temp:
+            temp.write(shortcut + "\n")
+        temp_path.replace(path)
+    finally:
+        temp_path.unlink(missing_ok=True)
+    say(f"Shortcut saved: {shortcut}")
+
+
+class Shortcuts:
+    def __init__(self, connection, root):
+        from Xlib import X, XK
+
+        self.connection = connection
+        self.root = root
+        self.modifiers = {"ctrl": X.ControlMask, "alt": X.Mod1Mask,
+                          "shift": X.ShiftMask, "super": X.Mod4Mask}
+        lock_codes = {connection.keysym_to_keycode(XK.string_to_keysym(name))
+                      for name in ("Num_Lock", "Scroll_Lock")}
+        ignored = {X.LockMask}
+        for index, keycodes in enumerate(connection.get_modifier_mapping()):
+            if (set(keycodes) - {0}) & lock_codes:
+                ignored.add(1 << index)
+        self.mask = 0xff & ~sum(ignored)
+        self.extras = {sum(subset) for size in range(len(ignored) + 1)
+                       for subset in combinations(ignored, size)}
+        self.enter = {(self.keycode(name), X.ControlMask) for name in ("Return", "KP_Enter")}
+        self.enter = {key for key in self.enter if key[0]}
+        self.escape = self.keycode("Escape"), 0
+
+    def keycode(self, name):
+        from Xlib import XK
+
+        return self.connection.keysym_to_keycode(XK.string_to_keysym(name))
+
+    def activation(self, shortcut):
+        names, key = shortcut_parts(shortcut)
+        if not re.fullmatch(r"[A-Za-z0-9]|[Ff](?:[1-9]|1[0-2])", key):
+            raise ValueError("Use a letter, number, or F1–F12 in the picker shortcut.")
+        code = self.keycode(key.lower() if len(key) == 1 else key.upper())
+        if not code:
+            raise ValueError(f"Unknown key: {key}. Use a letter, number, or F1–F12.")
+        binding = code, sum(self.modifiers[name] for name in names)
+        if binding in self.enter:
+            raise ValueError("Ctrl+Enter is reserved for starting and stopping recordings.")
+        return binding
+
+    def grab(self, binding, name):
+        from Xlib import X, error
+
+        code, mask = binding
+        errors = []
+        for extra in self.extras:
+            handler = error.CatchError()
+            self.root.grab_key(code, mask | extra, False, X.GrabModeAsync, X.GrabModeAsync,
+                               onerror=handler)
+            errors.append((extra, handler))
+        self.connection.sync()
+        if any(handler.get_error() for _, handler in errors):
+            for extra, handler in errors:
+                if not handler.get_error():
+                    self.root.ungrab_key(code, mask | extra)
+            self.connection.flush()
+            raise ValueError(f"Could not register {name}. It may already be in use.")
+
+    def ungrab(self, binding):
+        code, mask = binding
+        for extra in self.extras:
+            self.root.ungrab_key(code, mask | extra)
+        self.connection.flush()
+
+
+def notify(title, body):
+    try:
+        subprocess.run(["notify-send", "--app-name=Crop Recording", title, body],
+                       check=True, timeout=3)
+    except (OSError, subprocess.SubprocessError):
+        say("Could not send a desktop notification.")
+
+
+class Recording:
+    def __init__(self, display_name, region):
+        x, y, width, height = region
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        self.folder = Path(tempfile.mkdtemp(prefix="crop-recording-", dir="/tmp"))
+        self.path = self.folder / f"crop-recording-{stamp}.mp4"
+        self.partial = self.folder / "recording.part.mp4"
+        self.frames = 0
+        self.progress = b""
+        try:
+            self.process = subprocess.Popen([
+                "ffmpeg", "-hide_banner", "-loglevel", "error", "-nostats",
+                "-stats_period", "0.15", "-progress", "pipe:1",
+                "-f", "x11grab", "-framerate", "30", "-video_size", f"{width}x{height}",
+                "-grab_x", str(x), "-grab_y", str(y), "-i", display_name,
+                "-an", "-c:v", "libx264rgb", "-qp", "0", "-preset", "slow",
+                "-fps_mode", "passthrough", "-movflags", "+faststart", str(self.partial),
+            ], stdin=subprocess.PIPE, stdout=subprocess.PIPE, start_new_session=True)
+        except OSError:
+            self.folder.rmdir()
+            raise
+
+    def update_progress(self, data):
+        lines = (self.progress + data).split(b"\n")
+        self.progress = lines.pop()
+        for line in lines:
+            if line.startswith(b"frame="):
+                self.frames = int(line.split(b"=", 1)[1])
+
+    def finish(self):
+        encoder = self.process
+        try:
+            data, _ = encoder.communicate(input=b"q\n", timeout=20)
+        except subprocess.TimeoutExpired:
+            encoder.kill()
+            data, _ = encoder.communicate()
+        self.update_progress(data)
+        if encoder.returncode or not self.frames or not self.partial.is_file():
+            self.partial.unlink(missing_ok=True)
+            self.folder.rmdir()
+            say("Recording failed or stopped before capturing any frames.")
+            notify("Recording failed", "No MP4 was saved.")
+            return
+        self.partial.rename(self.path)
+        return self.path
+
+
+class CropRecording:
+    def __init__(self, connection, display_name, region):
+        from delivery import FileClipboard
+
+        self.connection = connection
+        self.display_name = display_name
+        self.region = region
+        self.root = connection.screen().root
+        self.shortcuts = Shortcuts(connection, self.root)
+        self.active_keys = set()
+        self.held_keys = set()
+        self.picker = self.overlay = self.recording = None
+        self.clipboard = FileClipboard()
+        self.result = None
+        self.activation = None
+        self.config = shortcut_config_path()
+        self.config_value = None
+        self.reload_hotkey()
+        if self.activation is None:
+            self.set_hotkey(DEFAULT_HOTKEY)
+
+    def set_hotkey(self, name):
+        binding = self.shortcuts.activation(name)
+        if binding != self.activation:
+            self.shortcuts.grab(binding, name)
+            if self.activation is not None:
+                self.shortcuts.ungrab(self.activation)
+            self.activation = binding
+            say(f"Crop Recording is ready. Press {name} to open the area picker.")
+
+    def reload_hotkey(self):
+        if self.picker or self.recording:
+            return True
+        try:
+            value = load_shortcut(self.config)
+        except (OSError, ValueError) as exc:
+            if self.config_value != str(exc):
+                self.config_value = str(exc)
+                say(f"Could not read shortcut settings: {exc}")
+            return True
+        if value != self.config_value:
+            self.config_value = value
+            try:
+                self.set_hotkey(value)
+            except ValueError as exc:
+                say(str(exc))
+                if self.activation is not None or value != DEFAULT_HOTKEY:
+                    notify("Crop Recording shortcut unavailable", str(exc))
+        return True
+
+    def open_picker(self):
+        from overlay import Picker
+
+        try:
+            for binding, name in [(key, "Ctrl+Enter") for key in self.shortcuts.enter] + [
+                (self.shortcuts.escape, "Esc")
+            ]:
+                self.shortcuts.grab(binding, name)
+                self.active_keys.add(binding)
+            size = self.root.get_geometry()
+            self.picker = Picker(size.width, size.height, self.region)
+        except (OSError, RuntimeError, ValueError) as exc:
+            self.close_session()
+            self.report_error(exc)
+
+    def start_recording(self):
+        from overlay import RecordingOverlay
+
+        picker = self.picker
+        region = picker.region
+        width, height = picker.width, picker.height
+        picker.close()
+        self.picker = None
+        self.shortcuts.ungrab(self.shortcuts.escape)
+        self.active_keys.discard(self.shortcuts.escape)
+        try:
+            self.overlay = RecordingOverlay(width, height, region)
+            self.recording = Recording(self.display_name, region)
+            self.overlay.started = time.monotonic()
+            say("Recording started.")
+        except (OSError, RuntimeError, ValueError) as exc:
+            self.close_session()
+            self.report_error(exc)
+
+    def close_session(self, show_result=True, timestamp=0):
+        path = None
+        try:
+            if self.recording:
+                recording, self.recording = self.recording, None
+                path = recording.finish()
+        except OSError as exc:
+            self.report_error(exc)
+        finally:
+            if self.overlay:
+                self.overlay.close()
+                self.overlay = None
+            if self.picker:
+                self.picker.close()
+                self.picker = None
+            for binding in self.active_keys:
+                self.shortcuts.ungrab(binding)
+            self.active_keys.clear()
+        if path and show_result:
+            from delivery import RecordingDialog
+
+            self.result = RecordingDialog(path, self.clipboard, self.result_finished, timestamp)
+        elif path:
+            self.result_finished(path, None)
+        if not show_result and self.result:
+            self.result.close(self.result.path)
+
+    def result_finished(self, path, message):
+        self.result = None
+        print(path, flush=True)
+        if message:
+            notify("Recording finished", message)
+
+    def report_error(self, exc):
+        say(f"crop-recording: {exc}")
+        notify("Crop Recording", str(exc))
+
+    def tick(self):
+        from Xlib import X
+
+        if self.recording:
+            progress = self.recording.process.stdout.fileno()
+            if select.select([progress], [], [], 0)[0]:
+                self.recording.update_progress(os.read(progress, 4096))
+            if self.recording.process.poll() is not None:
+                self.close_session()
+            else:
+                self.overlay.update()
+
+        while self.connection.pending_events():
+            event = self.connection.next_event()
+            if event.type != X.KeyPress or event.detail in self.held_keys:
+                continue
+            key = event.detail, event.state & self.shortcuts.mask
+            if key != self.activation and key not in self.active_keys:
+                continue
+            self.held_keys.add(event.detail)
+            if key == self.activation and not (self.picker or self.recording or self.result):
+                self.open_picker()
+            elif self.picker and key == self.shortcuts.escape:
+                self.close_session()
+            elif key in self.shortcuts.enter:
+                if self.recording:
+                    self.close_session(timestamp=event.time)
+                elif self.picker and self.picker.ready:
+                    self.start_recording()
+        if self.held_keys:
+            keys = self.connection.query_keymap()
+            self.held_keys = {code for code in self.held_keys
+                              if keys[code // 8] & (1 << (code % 8))}
+        return True
+
+
+def run(region):
+    from Xlib import display
+    from Xlib.error import DisplayError
+
+    display_name = os.environ.get("DISPLAY")
+    if os.environ.get("XDG_SESSION_TYPE") == "wayland" or os.environ.get("WAYLAND_DISPLAY"):
+        raise ValueError("Crop Recording requires X11 (Ubuntu on Xorg).")
+    if not display_name:
+        raise ValueError("Crop Recording requires an X11 desktop session.")
+    os.environ["GDK_BACKEND"] = "x11"
+    os.environ["GDK_SCALE"] = "1"
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib" / "crop-recording"))
+    from overlay import Gtk
+    from gi.repository import GLib
+
+    if not Gtk.init_check()[0]:
+        raise ValueError("Could not open the GTK display on X11.")
+    try:
+        connection = display.Display(display_name)
+    except DisplayError as exc:
+        raise ValueError(str(exc)) from exc
+    try:
+        daemon = CropRecording(connection, display_name, region)
+        loop = GLib.MainLoop()
+
+        def quit_requested():
+            loop.quit()
+            return GLib.SOURCE_REMOVE
+
+        GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, signal.SIGINT, quit_requested)
+        GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, signal.SIGTERM, quit_requested)
+        GLib.timeout_add(30, daemon.tick)
+        GLib.timeout_add_seconds(1, daemon.reload_hotkey)
+        try:
+            loop.run()
+        finally:
+            daemon.close_session(show_result=False)
+    finally:
+        connection.close()
+
+
+def main():
+    os.environ["LANGUAGE"] = "en"
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--menu", action="store_true", help="open the shortcut settings menu")
+    parser.add_argument("--region", type=region_arg, metavar="X,Y,LEBAR,TINGGI",
+                        help="preselect an area by coordinates, or drag to select without this option")
+    args = parser.parse_args()
+    try:
+        if args.menu:
+            shortcut_menu(shortcut_config_path())
+            return 0
+        run(args.region)
+    except (ValueError, OSError, ImportError, argparse.ArgumentTypeError) as exc:
+        say(f"crop-recording: {exc}")
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

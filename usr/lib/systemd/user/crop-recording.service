@@ -1,0 +1,12 @@
+[Unit]
+Description=Crop Recording desktop area recorder
+PartOf=graphical-session.target
+ConditionEnvironment=DISPLAY
+ConditionEnvironment=!WAYLAND_DISPLAY
+
+[Service]
+ExecStart=/usr/bin/crop-recording
+Restart=on-failure
+RestartSec=3
+KillMode=mixed
+TimeoutStopSec=30

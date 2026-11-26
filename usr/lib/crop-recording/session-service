@@ -1,0 +1,32 @@
+#!/bin/sh
+# Operate on each desktop user's own systemd manager.
+set -eu
+
+user_systemctl() {
+    uid=$1
+    shift
+    runtime=/run/user/$uid
+    [ -S "$runtime/bus" ] || return 0
+    name=$(id -nu "$uid") || return 0
+    runuser -u "$name" -- env XDG_RUNTIME_DIR="$runtime" \
+        DBUS_SESSION_BUS_ADDRESS="unix:path=$runtime/bus" systemctl --user "$@"
+}
+
+case "$1" in
+    start)
+        loginctl list-sessions --no-legend --no-pager 2>/dev/null |
+            while read -r session uid rest; do
+                type=$(loginctl show-session "$session" -p Type --value 2>/dev/null) || continue
+                [ "$type" = x11 ] || continue
+                user_systemctl "$uid" daemon-reload || continue
+                user_systemctl "$uid" --no-block start crop-recording.service || :
+            done
+        ;;
+    stop)
+        for bus in /run/user/[0-9]*/bus; do
+            [ -S "$bus" ] || continue
+            runtime=${bus%/bus}
+            user_systemctl "${runtime##*/}" stop crop-recording.service || :
+        done
+        ;;
+esac

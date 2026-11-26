@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=Crop Recording
+Comment=Listen for the area recording shortcut
+Exec=/usr/bin/systemctl --user start crop-recording.service
+TryExec=/usr/bin/crop-recording
+Terminal=false
